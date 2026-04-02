@@ -1,0 +1,76 @@
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raftpay-node1
+    environment:
+      - NODE_ID=node1
+      - SERVER_PORT=8080
+      - GRPC_PORT=9090
+      - PEERS=node2=raftpay-node2:9090,node3=raftpay-node3:9090
+      - DATA_DIR=/app/data
+      - ELECTION_TIMEOUT_MIN=3000
+      - ELECTION_TIMEOUT_MAX=6000
+      - HEARTBEAT_INTERVAL=500
+    ports:
+      - "8081:8080"
+      - "9091:9090"
+    networks:
+      - raft-net
+    volumes:
+      - node1-data:/app/data
+
+  node2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raftpay-node2
+    environment:
+      - NODE_ID=node2
+      - SERVER_PORT=8080
+      - GRPC_PORT=9090
+      - PEERS=node1=raftpay-node1:9090,node3=raftpay-node3:9090
+      - DATA_DIR=/app/data
+      - ELECTION_TIMEOUT_MIN=3000
+      - ELECTION_TIMEOUT_MAX=6000
+      - HEARTBEAT_INTERVAL=500
+    ports:
+      - "8082:8080"
+      - "9092:9090"
+    networks:
+      - raft-net
+    volumes:
+      - node2-data:/app/data
+
+  node3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: raftpay-node3
+    environment:
+      - NODE_ID=node3
+      - SERVER_PORT=8080
+      - GRPC_PORT=9090
+      - PEERS=node1=raftpay-node1:9090,node2=raftpay-node2:9090
+      - DATA_DIR=/app/data
+      - ELECTION_TIMEOUT_MIN=3000
+      - ELECTION_TIMEOUT_MAX=6000
+      - HEARTBEAT_INTERVAL=500
+    ports:
+      - "8083:8080"
+      - "9093:9090"
+    networks:
+      - raft-net
+    volumes:
+      - node3-data:/app/data
+
+networks:
+  raft-net:
+    driver: bridge
+    name: raft-net
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

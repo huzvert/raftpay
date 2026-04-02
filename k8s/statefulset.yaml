@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: raftpay
+  labels:
+    app: raftpay
+spec:
+  serviceName: raftpay-headless
+  replicas: 5
+  selector:
+    matchLabels:
+      app: raftpay
+  template:
+    metadata:
+      labels:
+        app: raftpay
+    spec:
+      containers:
+        - name: raftpay
+          image: raftpay:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: grpc
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_ID
+              value: "$(POD_NAME)"
+            - name: SERVER_PORT
+              value: "8080"
+            - name: GRPC_PORT
+              value: "9090"
+            - name: PEERS
+              value: "raftpay-0=raftpay-0.raftpay-headless:9090,raftpay-1=raftpay-1.raftpay-headless:9090,raftpay-2=raftpay-2.raftpay-headless:9090,raftpay-3=raftpay-3.raftpay-headless:9090,raftpay-4=raftpay-4.raftpay-headless:9090"
+            - name: DATA_DIR
+              value: "/app/data"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /api/cluster/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/cluster/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

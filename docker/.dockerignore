@@ -1,0 +1,6 @@
+.gradle
+**/build
+!api/build/libs
+.idea
+*.iml
+data

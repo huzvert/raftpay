@@ -1,0 +1,10 @@
+dependencies {
+    implementation project(':proto')
+    implementation 'io.grpc:grpc-netty-shaded:1.62.2'
+    implementation 'io.grpc:grpc-protobuf:1.62.2'
+    implementation 'io.grpc:grpc-stub:1.62.2'
+    implementation 'com.google.protobuf:protobuf-java:3.25.3'
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.slf4j:slf4j-api:2.0.12'
+    implementation 'ch.qos.logback:logback-classic:1.5.3'
+}

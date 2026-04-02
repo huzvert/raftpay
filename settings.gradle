@@ -1,0 +1,6 @@
+rootProject.name = 'raftpay'
+
+include 'proto'
+include 'raft-core'
+include 'state-machine'
+include 'api'
