@@ -4,8 +4,10 @@ import com.raftpay.api.dto.ApiResponse;
 import com.raftpay.banking.BankStateMachine;
 import com.raftpay.raft.LogEntry;
 import com.raftpay.raft.RaftNode;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
 
@@ -16,10 +18,61 @@ public class ClusterController {
 
     private final RaftNode raftNode;
     private final BankStateMachine bankStateMachine;
+    private final RestTemplate restTemplate = new RestTemplate();
+
+    @Value("${raftpay.peers:}")
+    private String peersConfig;
 
     public ClusterController(RaftNode raftNode, BankStateMachine bankStateMachine) {
         this.raftNode = raftNode;
         this.bankStateMachine = bankStateMachine;
+    }
+
+    /**
+     * Returns status of ALL nodes in the cluster by querying peers server-side.
+     * This allows remote dashboards (via ngrok etc.) to see all nodes.
+     */
+    @GetMapping("/all-status")
+    public ResponseEntity<List<Map<String, Object>>> getAllNodesStatus() {
+        List<Map<String, Object>> allStatus = new ArrayList<>();
+
+        // Add this node's status
+        Map<String, Object> myStatus = raftNode.getStatus();
+        myStatus.put("accountCount", bankStateMachine.getAccountCount());
+        myStatus.put("reachable", true);
+        allStatus.add(myStatus);
+
+        // Query each peer's status via HTTP
+        if (peersConfig != null && !peersConfig.isBlank()) {
+            for (String peerEntry : peersConfig.split(",")) {
+                peerEntry = peerEntry.trim();
+                if (peerEntry.isEmpty()) continue;
+                String[] parts = peerEntry.split("=", 2);
+                if (parts.length != 2) continue;
+
+                String peerId = parts[0].trim();
+                String grpcAddress = parts[1].trim(); // e.g., raftpay-node2:9090
+                String hostname = grpcAddress.split(":")[0];
+                String httpUrl = "http://" + hostname + ":8080/api/cluster/status";
+
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> peerStatus = restTemplate.getForObject(httpUrl, Map.class);
+                    if (peerStatus != null) {
+                        peerStatus.put("reachable", true);
+                        allStatus.add(peerStatus);
+                    }
+                } catch (Exception e) {
+                    Map<String, Object> downNode = new LinkedHashMap<>();
+                    downNode.put("nodeId", peerId);
+                    downNode.put("state", "OFFLINE");
+                    downNode.put("reachable", false);
+                    allStatus.add(downNode);
+                }
+            }
+        }
+
+        return ResponseEntity.ok(allStatus);
     }
 
     @GetMapping("/status")

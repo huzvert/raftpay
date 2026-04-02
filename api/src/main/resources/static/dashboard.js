@@ -1,90 +1,88 @@
 // RaftPay Dashboard
-// Polls all 5 nodes and displays cluster state in real-time
+// Works both locally and remotely (via ngrok etc.)
 
-const NODES = [
-    { id: 'node1', port: 8081 },
-    { id: 'node2', port: 8082 },
-    { id: 'node3', port: 8083 },
-    { id: 'node4', port: 8084 },
-    { id: 'node5', port: 8085 }
-];
-
-const POLL_INTERVAL = 1000; // 1 second
+const POLL_INTERVAL = 1500;
 let previousLeader = null;
-let leaderPort = null;
+let nodeIds = [];
 
 // ========== Initialization ==========
 
 function init() {
-    renderNodeCards();
-    setupForms();
+    addEvent('Dashboard started. Polling cluster...', '');
     pollCluster();
     setInterval(pollCluster, POLL_INTERVAL);
+    setupForms();
 }
 
 // ========== Polling ==========
 
 async function pollCluster() {
-    let nodesUp = 0;
-    let currentLeader = null;
-    let maxTerm = 0;
+    try {
+        // Use the server-side endpoint that queries all nodes
+        const response = await fetch(`/api/cluster/all-status`, {
+            signal: AbortSignal.timeout(3000)
+        });
+        const allStatus = await response.json();
 
-    for (const node of NODES) {
-        try {
-            const response = await fetch(`http://localhost:${node.port}/api/cluster/status`, {
-                signal: AbortSignal.timeout(2000)
-            });
-            const status = await response.json();
-
-            updateNodeCard(node.id, status);
-            nodesUp++;
-
-            if (status.currentTerm > maxTerm) {
-                maxTerm = status.currentTerm;
-            }
-
-            if (status.state === 'LEADER') {
-                currentLeader = node.id;
-                leaderPort = node.port;
-            }
-        } catch (e) {
-            updateNodeCard(node.id, null); // Node is down
+        // Render node cards if we haven't yet or node count changed
+        if (nodeIds.length !== allStatus.length) {
+            nodeIds = allStatus.map(s => s.nodeId);
+            renderNodeCards(allStatus);
         }
-    }
 
-    // Update header
-    document.getElementById('cluster-term').textContent = `Term: ${maxTerm}`;
-    document.getElementById('cluster-leader').textContent = `Leader: ${currentLeader || 'NONE'}`;
-    document.getElementById('cluster-health').textContent = `Nodes: ${nodesUp}/5`;
+        let nodesUp = 0;
+        let currentLeader = null;
+        let maxTerm = 0;
 
-    // Detect leader changes
-    if (currentLeader !== previousLeader && previousLeader !== null) {
-        if (currentLeader) {
-            addEvent(`Leader changed: ${previousLeader || 'none'} → ${currentLeader}`, 'warning');
-        } else {
-            addEvent('No leader! Cluster may be electing...', 'error');
+        for (const status of allStatus) {
+            if (status.reachable) {
+                nodesUp++;
+                updateNodeCard(status.nodeId, status);
+                if (status.currentTerm > maxTerm) {
+                    maxTerm = status.currentTerm;
+                }
+                if (status.state === 'LEADER') {
+                    currentLeader = status.nodeId;
+                }
+            } else {
+                updateNodeCard(status.nodeId, null);
+            }
         }
-    }
-    previousLeader = currentLeader;
 
-    // Fetch accounts and log from leader (or any available node)
-    const fetchPort = leaderPort || NODES.find(n => true)?.port;
-    if (fetchPort) {
-        fetchAccounts(fetchPort);
-        fetchLog(fetchPort);
+        // Update header
+        document.getElementById('cluster-term').textContent = `Term: ${maxTerm}`;
+        document.getElementById('cluster-leader').textContent = `Leader: ${currentLeader || 'NONE'}`;
+        document.getElementById('cluster-health').textContent = `Nodes: ${nodesUp}/${allStatus.length}`;
+
+        // Detect leader changes
+        if (currentLeader !== previousLeader && previousLeader !== null) {
+            if (currentLeader) {
+                addEvent(`Leader changed: ${previousLeader || 'none'} → ${currentLeader}`, 'warning');
+            } else {
+                addEvent('No leader! Cluster may be electing...', 'error');
+            }
+        }
+        previousLeader = currentLeader;
+
+        // Fetch accounts and log from this node (via relative URL)
+        fetchAccounts();
+        fetchLog();
+
+    } catch (e) {
+        // Can't reach the server at all
+        document.getElementById('cluster-leader').textContent = 'Leader: UNREACHABLE';
     }
 }
 
 // ========== Node Cards ==========
 
-function renderNodeCards() {
+function renderNodeCards(statuses) {
     const grid = document.getElementById('nodes-grid');
-    grid.innerHTML = NODES.map(node => `
-        <div class="node-card down" id="card-${node.id}">
-            <div class="node-id">${node.id}</div>
+    grid.innerHTML = statuses.map(s => `
+        <div class="node-card down" id="card-${s.nodeId}">
+            <div class="node-id">${s.nodeId}</div>
             <div class="node-state">OFFLINE</div>
             <div class="node-details">
-                <div>Port: ${node.port}</div>
                 <div>Term: -</div>
                 <div>Log: -</div>
                 <div>Commit: -</div>
@@ -100,6 +98,11 @@ function updateNodeCard(nodeId, status) {
     if (!status) {
         card.className = 'node-card down';
         card.querySelector('.node-state').textContent = 'OFFLINE';
+        card.querySelector('.node-details').innerHTML = `
+            <div>Term: -</div>
+            <div>Log: -</div>
+            <div>Commit: -</div>
+        `;
         return;
     }
 
@@ -117,9 +120,9 @@ function updateNodeCard(nodeId, status) {
 
 // ========== Accounts Table ==========
 
-async function fetchAccounts(port) {
+async function fetchAccounts() {
     try {
-        const response = await fetch(`http://localhost:${port}/api/accounts`, {
+        const response = await fetch(`/api/accounts`, {
             signal: AbortSignal.timeout(2000)
         });
         const result = await response.json();
@@ -144,9 +147,9 @@ async function fetchAccounts(port) {
 
 // ========== Raft Log Table ==========
 
-async function fetchLog(port) {
+async function fetchLog() {
     try {
-        const response = await fetch(`http://localhost:${port}/api/cluster/log`, {
+        const response = await fetch(`/api/cluster/log`, {
             signal: AbortSignal.timeout(2000)
         });
         const result = await response.json();
@@ -190,8 +193,6 @@ async function fetchLog(port) {
 function setupForms() {
     document.getElementById('create-account-form').addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!leaderPort) { addEvent('No leader available', 'error'); return; }
-
         const data = {
             accountId: document.getElementById('new-account-id').value,
             ownerName: document.getElementById('new-owner').value,
@@ -199,7 +200,7 @@ function setupForms() {
         };
 
         try {
-            const res = await fetch(`http://localhost:${leaderPort}/api/accounts`, {
+            const res = await fetch(`/api/accounts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
@@ -214,8 +215,6 @@ function setupForms() {
 
     document.getElementById('transfer-form').addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!leaderPort) { addEvent('No leader available', 'error'); return; }
-
         const data = {
             fromAccountId: document.getElementById('transfer-from').value,
             toAccountId: document.getElementById('transfer-to').value,
@@ -223,7 +222,7 @@ function setupForms() {
         };
 
         try {
-            const res = await fetch(`http://localhost:${leaderPort}/api/transfers`, {
+            const res = await fetch(`/api/transfers`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(data)
@@ -238,13 +237,11 @@ function setupForms() {
 
     document.getElementById('deposit-form').addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!leaderPort) { addEvent('No leader available', 'error'); return; }
-
         const accountId = document.getElementById('deposit-account').value;
         const amount = parseFloat(document.getElementById('deposit-amount').value);
 
         try {
-            const res = await fetch(`http://localhost:${leaderPort}/api/accounts/${accountId}/deposit`, {
+            const res = await fetch(`/api/accounts/${accountId}/deposit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ amount })
@@ -259,13 +256,11 @@ function setupForms() {
 
     document.getElementById('withdraw-form').addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!leaderPort) { addEvent('No leader available', 'error'); return; }
-
         const accountId = document.getElementById('withdraw-account').value;
         const amount = parseFloat(document.getElementById('withdraw-amount').value);
 
         try {
-            const res = await fetch(`http://localhost:${leaderPort}/api/accounts/${accountId}/withdraw`, {
+            const res = await fetch(`/api/accounts/${accountId}/withdraw`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ amount })
