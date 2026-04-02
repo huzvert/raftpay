@@ -3,7 +3,7 @@
 # Usage: ./restart-node.sh <node_number>
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <node_number (1-5)>"
+    echo "Usage: $0 <node_number (1-3)>"
     exit 1
 fi
 
