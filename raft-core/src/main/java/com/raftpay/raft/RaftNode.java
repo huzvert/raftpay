@@ -5,7 +5,7 @@ import com.raftpay.raft.election.ElectionTimer;
 import com.raftpay.raft.rpc.RaftGrpcClient;
 import com.raftpay.raft.rpc.RaftGrpcService;
 import io.grpc.Server;
-import io.grpc.ServerBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -81,8 +81,14 @@ public class RaftNode {
 
     public void start() throws IOException {
         // Start gRPC server
-        grpcServer = ServerBuilder.forPort(config.getGrpcPort())
+        // Server-side keepalive policy: permit client pings every 5s without active calls.
+        // Without this, the default policy rejects pings as "too_many_pings" (GOAWAY
+        // ENHANCE_YOUR_CALM), killing connections and causing heartbeat gaps that
+        // trigger spurious elections.
+        grpcServer = NettyServerBuilder.forPort(config.getGrpcPort())
                 .addService(new RaftGrpcService(this))
+                .permitKeepAliveTime(5, TimeUnit.SECONDS)
+                .permitKeepAliveWithoutCalls(true)
                 .build()
                 .start();
         log.info("[{}] gRPC server started on port {}", nodeId, config.getGrpcPort());
@@ -113,21 +119,33 @@ public class RaftNode {
 
     private void startElection() {
         synchronized (stateLock) {
-            // Pre-vote check: don't start election if we recently heard from a leader.
-            // This prevents spurious elections from disrupting a stable cluster (Raft §6).
+            // Leader lease: don't start election if we recently heard from a leader.
+            // Prevents spurious elections from disrupting a stable cluster (Raft §6).
             long lastHB = lastHeartbeatTime.get();
             long timeSinceHeartbeat = System.currentTimeMillis() - lastHB;
             if (lastHB > 0 && timeSinceHeartbeat < config.getElectionTimeoutMin()) {
                 log.debug("[{}] Suppressing election - last heartbeat was {}ms ago", nodeId, timeSinceHeartbeat);
                 return;
             }
+        }
 
+        // Pre-vote phase (Raft §9.6): ask peers if they would vote for us at term+1
+        // WITHOUT incrementing our term yet. If a majority would not grant, abort —
+        // this prevents term inflation from a partitioned/disconnected node from
+        // disrupting a stable cluster when it rejoins.
+        if (!runPreVote()) {
+            log.debug("[{}] Pre-vote did not pass — aborting election to avoid term inflation", nodeId);
+            electionTimer.reset();
+            return;
+        }
+
+        synchronized (stateLock) {
             currentTerm++;
             state = RaftState.CANDIDATE;
             votedFor = nodeId;
             leaderId = null;
             persistState();
-            log.info("[{}] Starting election for term {}", nodeId, currentTerm);
+            log.info("[{}] Pre-vote granted — starting real election for term {}", nodeId, currentTerm);
         }
 
         electionTimer.reset();
@@ -201,9 +219,97 @@ public class RaftNode {
         }
     }
 
-    // Variable needs to be effectively final for lambda - using array trick above.
-    // Actually let me refactor - the votesReceived needs to be tracked differently.
-    // The above approach works because we break out of the loop and check at the end.
+    /**
+     * Pre-vote phase (Raft §9.6).
+     * Asks peers whether they would grant a vote at currentTerm+1, without
+     * actually incrementing our term or changing votedFor. Returns true if a
+     * majority (including self) would grant. This prevents a disconnected
+     * follower's runaway term from forcing a healthy leader to step down.
+     */
+    private boolean runPreVote() {
+        final long hypotheticalTerm;
+        final long lastLogIndex;
+        final long lastLogTerm;
+
+        synchronized (stateLock) {
+            if (state == RaftState.LEADER) return false;
+            hypotheticalTerm = currentTerm + 1;
+            lastLogIndex = raftLog.getLastIndex();
+            lastLogTerm = raftLog.getLastTerm();
+        }
+
+        log.info("[{}] Starting pre-vote for hypothetical term {}", nodeId, hypotheticalTerm);
+
+        VoteRequest request = VoteRequest.newBuilder()
+                .setTerm(hypotheticalTerm)
+                .setCandidateId(nodeId)
+                .setLastLogIndex(lastLogIndex)
+                .setLastLogTerm(lastLogTerm)
+                .build();
+
+        int votesReceived = 1; // self
+        int majority = config.getMajority();
+
+        List<Future<VoteResponse>> futures = new ArrayList<>();
+        for (String peerId : config.getPeers().keySet()) {
+            futures.add(rpcExecutor.submit(() -> grpcClient.preVote(peerId, request)));
+        }
+
+        for (Future<VoteResponse> future : futures) {
+            try {
+                VoteResponse response = future.get(1, TimeUnit.SECONDS);
+                if (response == null) continue;
+                if (response.getVoteGranted()) {
+                    votesReceived++;
+                }
+            } catch (TimeoutException | InterruptedException | ExecutionException e) {
+                // peer unreachable — counts as "no"
+            }
+            if (votesReceived >= majority) break;
+        }
+
+        boolean passed = votesReceived >= majority;
+        log.info("[{}] Pre-vote {}: {}/{}", nodeId, passed ? "PASSED" : "FAILED", votesReceived, majority);
+        return passed;
+    }
+
+    /**
+     * Handles incoming PreVote RPCs. CRITICAL: must not mutate any state
+     * (no term update, no votedFor change, no timer reset). It is purely
+     * a read-only "would I vote?" check.
+     */
+    public VoteResponse handlePreVoteRequest(VoteRequest request) {
+        synchronized (stateLock) {
+            // Leader lease: if we recently heard from a valid leader, deny.
+            long now = System.currentTimeMillis();
+            long lastHB = lastHeartbeatTime.get();
+            long timeSinceHeartbeat = now - lastHB;
+            if (lastHB > 0 && timeSinceHeartbeat < config.getElectionTimeoutMin()) {
+                log.debug("[{}] Denying pre-vote for {} (leader lease, {}ms ago)",
+                        nodeId, request.getCandidateId(), timeSinceHeartbeat);
+                return VoteResponse.newBuilder()
+                        .setTerm(currentTerm)
+                        .setVoteGranted(false)
+                        .build();
+            }
+
+            // Hypothetical term must be at least our current term.
+            if (request.getTerm() < currentTerm) {
+                return VoteResponse.newBuilder()
+                        .setTerm(currentTerm)
+                        .setVoteGranted(false)
+                        .build();
+            }
+
+            // Log must be at least as up-to-date as ours.
+            boolean granted = isLogUpToDate(request.getLastLogIndex(), request.getLastLogTerm());
+
+            return VoteResponse.newBuilder()
+                    .setTerm(currentTerm)
+                    .setVoteGranted(granted)
+                    .build();
+        }
+    }
 
     private void becomeLeader() {
         state = RaftState.LEADER;

@@ -7,6 +7,10 @@ option java_multiple_files = true;
 
 // Core Raft consensus RPCs
 service RaftService {
+    // Pre-vote phase (Raft §9.6): asks peers "would you vote for me at term+1?"
+    // without mutating any state. Prevents term inflation from spurious elections.
+    rpc PreVote (VoteRequest) returns (VoteResponse);
+
     // Leader election: candidate requests votes from peers
     rpc RequestVote (VoteRequest) returns (VoteResponse);
 

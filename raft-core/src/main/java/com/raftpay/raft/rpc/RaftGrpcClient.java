@@ -65,6 +65,24 @@ public class RaftGrpcClient {
         }
     }
 
+    public VoteResponse preVote(String peerId, VoteRequest request) {
+        try {
+            return getStub(peerId)
+                    .withDeadlineAfter(RPC_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .preVote(request);
+        } catch (StatusRuntimeException e) {
+            log.debug("PreVote to {} failed: {}", peerId, e.getStatus());
+            if (shouldInvalidate(e.getStatus())) {
+                invalidateStub(peerId);
+            }
+            return null;
+        } catch (Exception e) {
+            log.debug("PreVote to {} failed: {}", peerId, e.getMessage());
+            invalidateStub(peerId);
+            return null;
+        }
+    }
+
     public AppendEntriesResponse appendEntries(String peerId, AppendEntriesRequest request) {
         try {
             return getStub(peerId)

@@ -20,6 +20,18 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
     }
 
     @Override
+    public void preVote(VoteRequest request, StreamObserver<VoteResponse> responseObserver) {
+        try {
+            VoteResponse response = raftNode.handlePreVoteRequest(request);
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            log.error("Error handling PreVote from {}", request.getCandidateId(), e);
+            responseObserver.onError(e);
+        }
+    }
+
+    @Override
     public void requestVote(VoteRequest request, StreamObserver<VoteResponse> responseObserver) {
         try {
             VoteResponse response = raftNode.handleVoteRequest(request);
